@@ -1,0 +1,10 @@
+[package]
+name = "cfl-view"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iced = { version = "0.14.0", features = ["image"] }
+array-lib = {git = "ssh://git@github.com/wyatt-A/array-lib", features = ["io-cfl"]}
+rayon = "1.11.0"
+rfd = "0.17.2"
