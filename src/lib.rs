@@ -1,3 +1,6 @@
+pub mod view_panel;
+
+
 // use std::fmt::{Debug, Formatter};
 // use std::path::PathBuf;
 // use std::time::Instant;
