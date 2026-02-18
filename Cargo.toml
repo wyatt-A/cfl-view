@@ -8,3 +8,5 @@ iced = { version = "0.14.0", features = ["image","tokio","canvas"] }
 array-lib = {git = "ssh://git@github.com/wyatt-A/array-lib", features = ["io-cfl"]}
 rayon = "1.11.0"
 rfd = "0.17.2"
+bytemuck = "1.25.0"
+iced_aksel = "0.2.0"
