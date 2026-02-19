@@ -1,0 +1,4 @@
+num_time_points: 16108
+dtype: double
+time_step_us: 0.1
+sample_order: time_us, gx_tpm, gy_tpm, gz_tpm, rf_x, rf_y, acqp
