@@ -1,11 +1,13 @@
+use std::cmp::Ordering;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use bytemuck::PodCastError::TargetAlignmentGreaterAndInputNotAligned;
 use iced;
-use iced::{keyboard, Element, Length, Point, Subscription, Task, Theme};
+use iced::{keyboard, Color, Element, Length, Point, Subscription, Task, Theme};
 use iced::keyboard::Modifiers;
 use iced::mouse::ScrollDelta;
-use iced::widget::{button, text, column, container, tooltip};
+use iced::widget::{button, text, column, container, tooltip, row, toggler};
 use iced::widget::tooltip::Position;
 use rfd::FileDialog;
 use iced_aksel;
@@ -14,7 +16,8 @@ use iced_aksel::plot::DragDelta;
 use iced_aksel::scale::Linear;
 use iced_aksel::shape::{Ellipse, Line};
 
-const X_ID: &str = "time";
+// axis IDs
+const T_ID: &str = "time";
 const GRAD_ID: &str = "grad";
 
 
@@ -22,12 +25,16 @@ struct State {
     pulse_seq_file:Option<PathBuf>,
     sample_buffer: Vec<f64>,
     chart_state:iced_aksel::State<&'static str,f64>,
-    plot_data_gx: Scatter,
+    plot_data_grad: [LineSeries;3],
     hover_text: Option<String>,
-    plot_bounds_t:[f64; 2],
-    plot_bounds_y:[f64; 2],
+    default_plot_bounds_t:[f64; 2],
+    default_plot_bounds_grad:[f64; 2],
     zoom_box:Option<[[f64;2];2]>,
     modifiers: Modifiers,
+
+    grad_x_visible:bool,
+    grad_y_visible:bool,
+    grad_z_visible:bool,
 }
 
 #[derive(Clone,Debug)]
@@ -40,7 +47,20 @@ enum Message {
     ChartScroll(Point,ScrollDelta),
     ChartClicked(Point),
     ModifiersChanged(Modifiers),
+    ResetView,
+    ViewToggle(bool, Channel)
+}
 
+#[derive(Clone,Debug)]
+enum Channel {
+    GX,
+    GY,
+    GZ,
+    RfMag,
+    RfRe,
+    RfIm,
+    RfPhase,
+    Acq,
 }
 
 impl Default for State {
@@ -50,7 +70,7 @@ impl Default for State {
 
 
         chart_state.set_axis(
-            X_ID,
+            T_ID,
             Axis::new(Linear::new(0.0, 100.0), axis::Position::Bottom),
         );
 
@@ -62,13 +82,16 @@ impl Default for State {
         Self {
             pulse_seq_file: Some(PathBuf::from("dti_fse.pshdr")),
             sample_buffer: Vec::new(),
-            plot_data_gx: Scatter::new(),
+            plot_data_grad: [LineSeries::new(), LineSeries::new(), LineSeries::new()],
             chart_state,
             hover_text: None,
-            plot_bounds_t: [0.,1.],
-            plot_bounds_y: [-1.,1.],
+            default_plot_bounds_t: [0.,1.],
+            default_plot_bounds_grad: [-1.,1.],
             zoom_box: None,
             modifiers: Modifiers::default(),
+            grad_x_visible: true,
+            grad_y_visible: true,
+            grad_z_visible: true,
         }
     }
 }
@@ -84,6 +107,10 @@ fn main() -> iced::Result {
         .run()
 }
 
+fn reset_plot_bounds(state:&mut State) {
+    state.chart_state.set_axis(T_ID, Axis::new(Linear::new(state.default_plot_bounds_t[0], state.default_plot_bounds_t[1]), axis::Position::Bottom));
+    state.chart_state.set_axis(GRAD_ID, Axis::new(Linear::new(state.default_plot_bounds_grad[0], state.default_plot_bounds_grad[1]), axis::Position::Left));
+}
 
 fn update(state:&mut State,message:Message) -> Task<Message> {
 
@@ -111,15 +138,29 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
                     f.read_to_end(&mut contents).unwrap();
                     let samples:Vec<f64> = bytemuck::cast_slice(&contents).to_vec();
                     state.sample_buffer = samples;
+
+                    let t_min = state.sample_buffer.chunks_exact(7).map(|chunk| chunk[0]).min_by(|a,b|a.partial_cmp(b).unwrap()).unwrap().to_owned();
+                    let t_max = state.sample_buffer.chunks_exact(7).map(|chunk| chunk[0]).max_by(|a,b|a.partial_cmp(b).unwrap()).unwrap().to_owned();
+
+                    state.default_plot_bounds_t = [t_min,t_max];
+
                     println!("loaded {} samples from disk",state.sample_buffer.len());
-                    state.plot_data_gx = Scatter::from_buffer(&state.sample_buffer,7,0,1);
+                    state.plot_data_grad = [
+                        LineSeries::from_buffer(&state.sample_buffer, 7, 0, 1, Color::from_rgba(0.,1.,0.,1.)),
+                        LineSeries::from_buffer(&state.sample_buffer, 7, 0, 2, Color::from_rgba(0.,0.,1.,1.)),
+                        LineSeries::from_buffer(&state.sample_buffer, 7, 0, 3, Color::from_rgba(1.,0.,0.,1.)),
+                    ];
 
-                    state.plot_bounds_t[0] = state.plot_data_gx.points.first().unwrap().x;
-                    state.plot_bounds_t[1] = state.plot_data_gx.points.last().unwrap().x;
+                    // find the plot bounds for the gradients
+                    state.default_plot_bounds_grad[0] = state.plot_data_grad.iter().map(|data|{
+                        data.points.iter().min_by(|a,b|a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap()
+                    }).min_by(|a,b| a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap().y;
 
-                    state.chart_state.set_axis(X_ID,Axis::new(Linear::new(state.plot_bounds_t[0], state.plot_bounds_t[1]), axis::Position::Bottom));
-                    state.chart_state.set_axis(GRAD_ID,Axis::new(Linear::new(state.plot_bounds_y[0], state.plot_bounds_y[1]), axis::Position::Left));
+                    state.default_plot_bounds_grad[1] = state.plot_data_grad.iter().map(|data|{
+                        data.points.iter().max_by(|a,b|a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap()
+                    }).max_by(|a,b| a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap().y;
 
+                    reset_plot_bounds(state);
                 }
             }
             Task::none()
@@ -127,8 +168,8 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
         Message::PlotHover(point) => {
 
             // transform point to plot coordinates
-            let t = (state.plot_bounds_t[1] - state.plot_bounds_t[0]) * point.x as f64 + state.plot_bounds_t[0];
-            let y = (state.plot_bounds_y[1] - state.plot_bounds_y[0]) * point.y as f64 + state.plot_bounds_y[0];
+            let t = (state.default_plot_bounds_t[1] - state.default_plot_bounds_t[0]) * point.x as f64 + state.default_plot_bounds_t[0];
+            let y = (state.default_plot_bounds_grad[1] - state.default_plot_bounds_grad[0]) * point.y as f64 + state.default_plot_bounds_grad[0];
 
             let t = t * 0.1e-3;
 
@@ -136,23 +177,29 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
             Task::none()
         }
         Message::ChartDrag(delta) => {
-            state.chart_state.pan_axes(X_ID,GRAD_ID,delta.x,delta.y);
+            state.chart_state.pan_axes(T_ID, GRAD_ID, delta.x, delta.y);
             Task::none()
         }
         Message::ChartScroll(cursor_norm,scroll_delta) => {
             let delta_y = match scroll_delta {
-                ScrollDelta::Lines { y, .. }
-                | ScrollDelta::Pixels { y, .. } => y,
+                ScrollDelta::Lines { y, x, .. }
+                | ScrollDelta::Pixels { y, x, .. } => {
+                    // on mac, holding shift changes the scroll axis. We'll just grab the non-zero delta
+                    if y == 0.0 {
+                        x
+                    }else {
+                        y
+                    }
+                },
             };
 
             let factor = if delta_y > 0.0 { 1.10 } else { 0.90 };
-
             // 2. Determine Targets (Default: X, Shift: Y, Ctrl: Both)
             let zoom_x = state.modifiers.command() || !state.modifiers.shift();
             let zoom_y = state.modifiers.command() || state.modifiers.shift();
 
             // 3. Apply Zoom
-            if zoom_x && let Some(axis) = state.chart_state.axis_mut_opt(&X_ID) {
+            if zoom_x && let Some(axis) = state.chart_state.axis_mut_opt(&T_ID) {
                 axis.zoom(factor, Some(cursor_norm.x));
             }
             if zoom_y && let Some(axis) = state.chart_state.axis_mut_opt(&GRAD_ID) {
@@ -168,6 +215,22 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
                 [0.,0.]
             ]);
             Task::none()
+        },
+        Message::ResetView => {
+            reset_plot_bounds(state);
+            Task::none()
+        },
+        Message::ViewToggle(visible, channel) => {
+            match channel {
+                Channel::GX => state.grad_x_visible = visible,
+                Channel::GY => state.grad_y_visible = visible,
+                Channel::GZ => state.grad_z_visible = visible,
+                _=> {}
+            }
+            state.plot_data_grad[0].set_visibility(state.grad_x_visible);
+            state.plot_data_grad[1].set_visibility(state.grad_y_visible);
+            state.plot_data_grad[2].set_visibility(state.grad_z_visible);
+            Task::none()
         }
     }
 
@@ -177,12 +240,13 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
 fn view(state:&State) -> Element<Message> {
 
     let chart = Chart::new(&state.chart_state)
-        .plot_data(&state.plot_data_gx, X_ID, GRAD_ID)
+        .plot_data(&state.plot_data_grad[0], T_ID, GRAD_ID)
+        .plot_data(&state.plot_data_grad[1], T_ID, GRAD_ID)
+        .plot_data(&state.plot_data_grad[2], T_ID, GRAD_ID)
         .on_hover(|point| Message::PlotHover(point))
         .on_scroll(|cursor_norm,scroll_delta| Message::ChartScroll(cursor_norm,scroll_delta))
         .on_click(|point|Message::ChartClicked(point))
         .on_drag(|drag_delta| Message::ChartDrag(drag_delta));
-        //.on_axis_hover(|axis_id, value| Message::PlotHover(axis_id, value));
 
     let tip = if let Some(dp) = &state.hover_text {
         text(dp.clone())
@@ -190,19 +254,30 @@ fn view(state:&State) -> Element<Message> {
         text("Hover chart")
     };
 
-    column![
+
+    let controls = column![
         button("choose ps file").on_press(Message::PickFileClicked),
         text(format!("file: {}",state.pulse_seq_file.as_ref().map(|x|x.to_str().unwrap()).unwrap_or("None"))),
         button("load").on_press(Message::LoadFileClicked),
-        tooltip(
+        button("reset view").on_press(Message::ResetView),
+        text("Visibility"),
+        toggler(state.grad_x_visible).label("grad-x").on_toggle(|state| Message::ViewToggle(state,Channel::GX)),
+        toggler(state.grad_y_visible).label("grad-y").on_toggle(|state| Message::ViewToggle(state,Channel::GY)),
+        toggler(state.grad_z_visible).label("grad-z").on_toggle(|state| Message::ViewToggle(state,Channel::GZ)),
+    ].spacing(10).padding(10);
+
+
+    let plot = tooltip(
             container(chart).width(Length::Fill).height(Length::Fill).padding(10),
             container(tip).padding(8),
             Position::FollowCursor,
-        )
-    ].into()
+    );
+
+    row![controls, plot].into()
+
 }
 
-pub fn subscription(state:&State) -> Subscription<Message> {
+pub fn subscription(_state:&State) -> Subscription<Message> {
     // Listen for modifier keys to enable axis-locking
     iced::event::listen_with(|event, _status, _window_id| {
         if let iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) = event {
@@ -248,51 +323,46 @@ fn file_dialog(starting_directory:Option<PathBuf>) -> Option<PathBuf> {
 }
 
 #[derive(Debug)]
-struct Scatter {
+struct LineSeries {
+    visible: bool,
     points: Vec<PlotPoint<f64>>,
+    color: Color,
 }
 
-impl Scatter {
+impl LineSeries {
     pub fn new() -> Self {
-        Self{points: Vec::new()}
+        Self{points: Vec::new(),color:Color::BLACK, visible:true}
     }
 
     /// gathers plot points from a larger buffer of points in memory with multiple y-axes
-    pub fn from_buffer(buffer:&[f64],stride:usize,x_offset:usize,y_offset:usize)-> Scatter {
-        Scatter {
-            points: buffer.chunks(stride).map(|chunk| PlotPoint::new(chunk[x_offset],chunk[y_offset]) ).collect()
+    pub fn from_buffer(buffer:&[f64],stride:usize,x_offset:usize,y_offset:usize, color:Color)-> LineSeries {
+        LineSeries {
+            visible: true,
+            points: buffer.chunks(stride).map(|chunk| PlotPoint::new(chunk[x_offset], chunk[y_offset]) ).collect(),
+            color,
         }
+    }
+
+    pub fn set_visibility(&mut self, visible: bool) {
+        self.visible = visible;
     }
 
 }
 
-impl Default for Scatter {
+impl Default for LineSeries {
     fn default() -> Self {
-        Self {
-            points: vec![
-                PlotPoint::new(10.0, 20.0),
-                PlotPoint::new(50.0, 80.0),
-                PlotPoint::new(90.0, 30.0),
-            ],
-        }
+        Self::new()
     }
 }
 
-impl PlotData<f64> for Scatter {
+impl PlotData<f64> for LineSeries {
     fn draw(&self, plot: &mut Plot<f64>, theme: &Theme) {
-
-
-        for seg in self.points.windows(2) {
-            plot.add_shape(
-                Line::new(seg[0], seg[1]).stroke(Stroke::new(theme.palette().primary,Measure::Screen(1.)))
-            )
+        if self.visible {
+            for seg in self.points.windows(2) {
+                plot.add_shape(
+                    Line::new(seg[0], seg[1]).stroke(Stroke::new(self.color,Measure::Screen(1.)))
+                )
+            }
         }
-
-        // for p in &self.points {
-        //     plot.add_shape(
-        //         Ellipse::new(*p, Measure::Screen(4.0), Measure::Screen(4.0))
-        //             .fill(theme.palette().primary),
-        //     );
-        // }
     }
 }
