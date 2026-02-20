@@ -2,7 +2,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use iced;
-use iced::{Element, Length, Point, Task, Theme};
+use iced::{keyboard, Element, Length, Point, Subscription, Task, Theme};
+use iced::keyboard::Modifiers;
+use iced::mouse::ScrollDelta;
 use iced::widget::{button, text, column, container, tooltip};
 use iced::widget::tooltip::Position;
 use rfd::FileDialog;
@@ -25,6 +27,7 @@ struct State {
     plot_bounds_t:[f64; 2],
     plot_bounds_y:[f64; 2],
     zoom_box:Option<[[f64;2];2]>,
+    modifiers: Modifiers,
 }
 
 #[derive(Clone,Debug)]
@@ -34,7 +37,10 @@ enum Message {
     LoadFileClicked,
     PlotHover(Point),
     ChartDrag(DragDelta),
+    ChartScroll(Point,ScrollDelta),
     ChartClicked(Point),
+    ModifiersChanged(Modifiers),
+
 }
 
 impl Default for State {
@@ -54,7 +60,7 @@ impl Default for State {
         );
 
         Self {
-            pulse_seq_file: Some(PathBuf::from("/Users/Wyatt/seq-lib/test_out/dti_fse.pshdr")),
+            pulse_seq_file: Some(PathBuf::from("dti_fse.pshdr")),
             sample_buffer: Vec::new(),
             plot_data_gx: Scatter::new(),
             chart_state,
@@ -62,6 +68,7 @@ impl Default for State {
             plot_bounds_t: [0.,1.],
             plot_bounds_y: [-1.,1.],
             zoom_box: None,
+            modifiers: Modifiers::default(),
         }
     }
 }
@@ -71,13 +78,20 @@ fn main() -> iced::Result {
 
     //iced::run(update,view)
 
-    iced::application(State::default,update,view).theme(iced::theme::Theme::CatppuccinMocha).run()
+    iced::application(State::default,update,view)
+        .subscription(subscription)
+        .theme(Theme::CatppuccinMocha)
+        .run()
 }
 
 
 fn update(state:&mut State,message:Message) -> Task<Message> {
 
     match message {
+        Message::ModifiersChanged(modifiers) => {
+            state.modifiers = modifiers;
+            Task::none()
+        }
         Message::PickFileClicked => {
             let starting_dir = state.pulse_seq_file.as_ref().map(|x|x.parent().unwrap().to_path_buf());
             Task::perform(pick_file(starting_dir), Message::FilePicked)
@@ -122,14 +136,31 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
             Task::none()
         }
         Message::ChartDrag(delta) => {
-            println!("drag:{:?}",delta);
-            state.zoom_box.as_mut().map(|zoom|{
-                zoom[1][0] = zoom[0][0] + delta.x as f64;
-                zoom[1][1] = zoom[0][1] + delta.y as f64;
-            });
-            println!("zoom :{:#?}",state.zoom_box);
+            state.chart_state.pan_axes(X_ID,GRAD_ID,delta.x,delta.y);
             Task::none()
         }
+        Message::ChartScroll(cursor_norm,scroll_delta) => {
+            let delta_y = match scroll_delta {
+                ScrollDelta::Lines { y, .. }
+                | ScrollDelta::Pixels { y, .. } => y,
+            };
+
+            let factor = if delta_y > 0.0 { 1.10 } else { 0.90 };
+
+            // 2. Determine Targets (Default: X, Shift: Y, Ctrl: Both)
+            let zoom_x = state.modifiers.command() || !state.modifiers.shift();
+            let zoom_y = state.modifiers.command() || state.modifiers.shift();
+
+            // 3. Apply Zoom
+            if zoom_x && let Some(axis) = state.chart_state.axis_mut_opt(&X_ID) {
+                axis.zoom(factor, Some(cursor_norm.x));
+            }
+            if zoom_y && let Some(axis) = state.chart_state.axis_mut_opt(&GRAD_ID) {
+                axis.zoom(factor, Some(cursor_norm.y));
+            }
+
+            Task::none()
+        },
         Message::ChartClicked(point) => {
             println!("click:{:?}",point);
             state.zoom_box = Some([
@@ -147,10 +178,9 @@ fn view(state:&State) -> Element<Message> {
 
     let chart = Chart::new(&state.chart_state)
         .plot_data(&state.plot_data_gx, X_ID, GRAD_ID)
-        .
         .on_hover(|point| Message::PlotHover(point))
+        .on_scroll(|cursor_norm,scroll_delta| Message::ChartScroll(cursor_norm,scroll_delta))
         .on_click(|point|Message::ChartClicked(point))
-        .on_
         .on_drag(|drag_delta| Message::ChartDrag(drag_delta));
         //.on_axis_hover(|axis_id, value| Message::PlotHover(axis_id, value));
 
@@ -170,6 +200,17 @@ fn view(state:&State) -> Element<Message> {
             Position::FollowCursor,
         )
     ].into()
+}
+
+pub fn subscription(state:&State) -> Subscription<Message> {
+    // Listen for modifier keys to enable axis-locking
+    iced::event::listen_with(|event, _status, _window_id| {
+        if let iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) = event {
+            Some(Message::ModifiersChanged(modifiers))
+        } else {
+            None
+        }
+    })
 }
 
 
