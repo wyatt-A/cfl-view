@@ -12,6 +12,7 @@ use iced::widget::tooltip::Position;
 use rfd::FileDialog;
 use iced_aksel;
 use iced_aksel::{axis, Axis, Chart, Measure, Plot, PlotData, PlotPoint, Stroke};
+use iced_aksel::axis::{TickContext, TickResult};
 use iced_aksel::plot::DragDelta;
 use iced_aksel::scale::Linear;
 use iced_aksel::shape::{Ellipse, Line};
@@ -19,22 +20,28 @@ use iced_aksel::shape::{Ellipse, Line};
 // axis IDs
 const T_ID: &str = "time";
 const GRAD_ID: &str = "grad";
-
+const RF_ID: &str = "rf";
 
 struct State {
     pulse_seq_file:Option<PathBuf>,
     sample_buffer: Vec<f64>,
     chart_state:iced_aksel::State<&'static str,f64>,
-    plot_data_grad: [LineSeries;3],
+
+    grad_line_series: [LineSeries;3],
+    rf_line_series: [LineSeries;2],
+
     hover_text: Option<String>,
+
     default_plot_bounds_t:[f64; 2],
     default_plot_bounds_grad:[f64; 2],
-    zoom_box:Option<[[f64;2];2]>,
+    default_plot_bounds_rf:[f64; 2],
+
     modifiers: Modifiers,
 
     grad_x_visible:bool,
     grad_y_visible:bool,
     grad_z_visible:bool,
+    rf_visible:bool,
 }
 
 #[derive(Clone,Debug)]
@@ -71,45 +78,56 @@ impl Default for State {
 
         chart_state.set_axis(
             T_ID,
-            Axis::new(Linear::new(0.0, 100.0), axis::Position::Bottom),
+            Axis::new(Linear::new(0.0, 1.0), axis::Position::Bottom)
+                .with_tick_renderer(t_axis_tick_renderer)
         );
+
 
         chart_state.set_axis(
             GRAD_ID,
-            Axis::new(Linear::new(0.0, 100.0), axis::Position::Left),
+            Axis::new(Linear::new(0.0, 1.0), axis::Position::Left)
+                .with_tick_renderer(t_axis_tick_renderer)
         );
+
+        chart_state.set_axis(
+            RF_ID,
+            Axis::new(Linear::new(0.0, 10.0), axis::Position::Right)
+                .with_tick_renderer(t_axis_tick_renderer)
+        );
+
+        let ls = LineSeries::new();
 
         Self {
             pulse_seq_file: Some(PathBuf::from("dti_fse.pshdr")),
             sample_buffer: Vec::new(),
-            plot_data_grad: [LineSeries::new(), LineSeries::new(), LineSeries::new()],
+            grad_line_series: [ls.clone(),ls.clone(),ls.clone()],
+            rf_line_series: [ls.clone(),ls.clone()],
             chart_state,
             hover_text: None,
             default_plot_bounds_t: [0.,1.],
             default_plot_bounds_grad: [-1.,1.],
-            zoom_box: None,
+            default_plot_bounds_rf: [0.,1.],
             modifiers: Modifiers::default(),
             grad_x_visible: true,
             grad_y_visible: true,
             grad_z_visible: true,
+            rf_visible: true,
         }
     }
 }
 
 
 fn main() -> iced::Result {
-
-    //iced::run(update,view)
-
     iced::application(State::default,update,view)
         .subscription(subscription)
         .theme(Theme::CatppuccinMocha)
         .run()
 }
 
-fn reset_plot_bounds(state:&mut State) {
-    state.chart_state.set_axis(T_ID, Axis::new(Linear::new(state.default_plot_bounds_t[0], state.default_plot_bounds_t[1]), axis::Position::Bottom));
-    state.chart_state.set_axis(GRAD_ID, Axis::new(Linear::new(state.default_plot_bounds_grad[0], state.default_plot_bounds_grad[1]), axis::Position::Left));
+fn apply_chart_bounds(state:&mut State) {
+    state.chart_state.set_domain(&T_ID,state.default_plot_bounds_t[0],state.default_plot_bounds_t[1]);
+    state.chart_state.set_domain(&GRAD_ID,state.default_plot_bounds_grad[0],state.default_plot_bounds_grad[1]);
+    state.chart_state.set_domain(&RF_ID,state.default_plot_bounds_grad[0],state.default_plot_bounds_grad[1]);
 }
 
 fn update(state:&mut State,message:Message) -> Task<Message> {
@@ -145,22 +163,35 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
                     state.default_plot_bounds_t = [t_min,t_max];
 
                     println!("loaded {} samples from disk",state.sample_buffer.len());
-                    state.plot_data_grad = [
+                    state.grad_line_series = [
                         LineSeries::from_buffer(&state.sample_buffer, 7, 0, 1, Color::from_rgba(0.,1.,0.,1.)),
                         LineSeries::from_buffer(&state.sample_buffer, 7, 0, 2, Color::from_rgba(0.,0.,1.,1.)),
                         LineSeries::from_buffer(&state.sample_buffer, 7, 0, 3, Color::from_rgba(1.,0.,0.,1.)),
                     ];
 
+                    state.rf_line_series = [
+                        LineSeries::from_buffer(&state.sample_buffer,7,0,4, Color::from_rgba(1.,0.,0.,1.)),
+                        LineSeries::from_buffer(&state.sample_buffer,7,0,5, Color::from_rgba(0.,0.,1.,1.)),
+                    ];
+
                     // find the plot bounds for the gradients
-                    state.default_plot_bounds_grad[0] = state.plot_data_grad.iter().map(|data|{
+                    state.default_plot_bounds_grad[0] = state.grad_line_series.iter().map(|data|{
                         data.points.iter().min_by(|a,b|a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap()
                     }).min_by(|a,b| a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap().y;
 
-                    state.default_plot_bounds_grad[1] = state.plot_data_grad.iter().map(|data|{
+                    state.default_plot_bounds_grad[1] = state.grad_line_series.iter().map(|data|{
                         data.points.iter().max_by(|a,b|a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap()
                     }).max_by(|a,b| a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap().y;
 
-                    reset_plot_bounds(state);
+                    // state.default_plot_bounds_rf[0] = state.rf_line_series.iter().map(|data|{
+                    //     data.points.iter().min_by(|a,b|a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap()
+                    // }).min_by(|a,b| a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap().y;
+                    //
+                    // state.default_plot_bounds_rf[1] = state.rf_line_series.iter().map(|data|{
+                    //     data.points.iter().max_by(|a,b|a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap()
+                    // }).max_by(|a,b| a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal)).unwrap().y;
+
+                    apply_chart_bounds(state);
                 }
             }
             Task::none()
@@ -178,6 +209,7 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
         }
         Message::ChartDrag(delta) => {
             state.chart_state.pan_axes(T_ID, GRAD_ID, delta.x, delta.y);
+            state.chart_state.pan_axes(T_ID, RF_ID, delta.x, delta.y);
             Task::none()
         }
         Message::ChartScroll(cursor_norm,scroll_delta) => {
@@ -205,19 +237,17 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
             if zoom_y && let Some(axis) = state.chart_state.axis_mut_opt(&GRAD_ID) {
                 axis.zoom(factor, Some(cursor_norm.y));
             }
+            if zoom_y && let Some(axis) = state.chart_state.axis_mut_opt(&RF_ID) {
+                axis.zoom(factor, Some(cursor_norm.y));
+            }
 
             Task::none()
         },
         Message::ChartClicked(point) => {
-            println!("click:{:?}",point);
-            state.zoom_box = Some([
-                [point.x as f64,point.y as f64],
-                [0.,0.]
-            ]);
             Task::none()
         },
         Message::ResetView => {
-            reset_plot_bounds(state);
+            apply_chart_bounds(state);
             Task::none()
         },
         Message::ViewToggle(visible, channel) => {
@@ -225,11 +255,14 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
                 Channel::GX => state.grad_x_visible = visible,
                 Channel::GY => state.grad_y_visible = visible,
                 Channel::GZ => state.grad_z_visible = visible,
+                Channel::RfRe => state.rf_visible = visible,
                 _=> {}
             }
-            state.plot_data_grad[0].set_visibility(state.grad_x_visible);
-            state.plot_data_grad[1].set_visibility(state.grad_y_visible);
-            state.plot_data_grad[2].set_visibility(state.grad_z_visible);
+            state.grad_line_series[0].set_visibility(state.grad_x_visible);
+            state.grad_line_series[1].set_visibility(state.grad_y_visible);
+            state.grad_line_series[2].set_visibility(state.grad_z_visible);
+            state.rf_line_series[0].set_visibility(state.rf_visible);
+            state.rf_line_series[1].set_visibility(state.rf_visible);
             Task::none()
         }
     }
@@ -240,9 +273,11 @@ fn update(state:&mut State,message:Message) -> Task<Message> {
 fn view(state:&State) -> Element<Message> {
 
     let chart = Chart::new(&state.chart_state)
-        .plot_data(&state.plot_data_grad[0], T_ID, GRAD_ID)
-        .plot_data(&state.plot_data_grad[1], T_ID, GRAD_ID)
-        .plot_data(&state.plot_data_grad[2], T_ID, GRAD_ID)
+        .plot_data(&state.grad_line_series[0], T_ID, GRAD_ID)
+        .plot_data(&state.grad_line_series[1], T_ID, GRAD_ID)
+        .plot_data(&state.grad_line_series[2], T_ID, GRAD_ID)
+        .plot_data(&state.rf_line_series[0], T_ID, RF_ID)
+        .plot_data(&state.rf_line_series[1], T_ID, RF_ID)
         .on_hover(|point| Message::PlotHover(point))
         .on_scroll(|cursor_norm,scroll_delta| Message::ChartScroll(cursor_norm,scroll_delta))
         .on_click(|point|Message::ChartClicked(point))
@@ -264,6 +299,7 @@ fn view(state:&State) -> Element<Message> {
         toggler(state.grad_x_visible).label("grad-x").on_toggle(|state| Message::ViewToggle(state,Channel::GX)),
         toggler(state.grad_y_visible).label("grad-y").on_toggle(|state| Message::ViewToggle(state,Channel::GY)),
         toggler(state.grad_z_visible).label("grad-z").on_toggle(|state| Message::ViewToggle(state,Channel::GZ)),
+        toggler(state.rf_visible).label("rf").on_toggle(|state| Message::ViewToggle(state,Channel::RfRe)),
     ].spacing(10).padding(10);
 
 
@@ -322,7 +358,7 @@ fn file_dialog(starting_directory:Option<PathBuf>) -> Option<PathBuf> {
 
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 struct LineSeries {
     visible: bool,
     points: Vec<PlotPoint<f64>>,
@@ -364,5 +400,17 @@ impl PlotData<f64> for LineSeries {
                 )
             }
         }
+    }
+}
+
+fn t_axis_tick_renderer(ctx: TickContext<f64, Theme>) -> TickResult {
+    if ctx.tick.level != 0 {
+        return TickResult::default();
+    }
+
+    TickResult {
+        label: Some(ctx.label(format!("{:.0}", ctx.tick.value))),
+        tick_line: Some(ctx.tickline()),
+        ..Default::default()
     }
 }
